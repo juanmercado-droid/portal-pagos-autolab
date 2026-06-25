@@ -38,9 +38,7 @@ const ESQUEMAS = {
 };
 const NOTA_IVA = 'Todos los montos de este portal son con IVA incluido: lo registrado, lo habilitado y lo facturado.';
 const MAX_FILE_MB = 2;
-const ADMIN_USERS = [
-  { email: 'juan.mercado@autolab.mx', password: 'Autolab-0as31EOy!' },
-];
+const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbw-jaEBHVFmxePVrY1KuOWvtQObbHSjvopeoGZuCz1lAs40IV5-Xp6I63rjX1dVI7xb/exec';
 
 /* ================= DOM HELPER (h) ================= */
 function h(tag, props = {}, children = []) {
@@ -118,44 +116,32 @@ async function extraerDatosComprobante(file) {
   throw new Error('Lectura automática por IA no disponible fuera de Claude todavía — escribe la referencia a mano.');
 }
 
-/* ================= STORAGE (localStorage) ================= */
-const KEY = 'autolab-portal-state-v3';
-function loadState() { try { const raw = localStorage.getItem(KEY); return raw ? JSON.parse(raw) : null; } catch (e) { return null; } }
-function saveState(s) { try { localStorage.setItem(KEY, JSON.stringify(s)); } catch (e) { console.error(e); } }
-
-/* ================= SEED DATA ================= */
-function seedState() {
-  const t = todayStr();
-  const providers = [
-    { id: 'p1', nombre: 'Transportes GDL Driver', email: 'pagos@gdldriver.mx', tipo: 'externo', ciudad: 'Guadalajara', esquema: 'fijo', montoFijo: 18500, diasCiclo: 30, diasCredito: 0, cuenta: '**** 4521', password: 'gdl2026', rfc: 'TGD850101AB1', condiciones: 'Pago contra factura, sin días de crédito.', docs: { csf: true, caratula: true } },
-  ];
-  const ciclos = [
-    { id: 'c1', providerId: 'p1', estado: 'abierto', habilitado: false, monto: 0, fechaVencimiento: addDays(t, 4), autoHabilitado: false },
-    { id: 'c0', providerId: 'p1', estado: 'cerrado', habilitado: true, monto: 18500, fechaVencimiento: addDays(t, -26), autoHabilitado: false },
-  ];
-  const registros = [];
-  const facturas = [
-    { id: uid('f'), providerId: 'p1', cicloId: 'c0', folio: 'F-0931', monto: 18500, fecha: addDays(t, -25), nota: '', estado: 'pagada', fechaAprobacion: addDays(t, -24), fechaPagoProgramada: addDays(t, -24), comprobante: { referencia: 'SPEI-88213', fecha: addDays(t, -23) } },
-  ];
-  return { providers, ciclos, registros, facturas };
-}
+/* ================= API (Apps Script + Google Sheet) ================= */
+const api = {
+  async get() {
+    const res = await fetch(APPS_SCRIPT_URL);
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.error || 'No se pudo leer la información del Sheet.');
+    return json.data;
+  },
+  async post(accion, payload) {
+    const res = await fetch(APPS_SCRIPT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ accion, ...payload }),
+    });
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.error || 'Ocurrió un problema al guardar.');
+    return json;
+  },
+};
 
 function montoSugerido(provider, ciclo, registros) {
   if (!ciclo) return 0;
-  if (provider.esquema === 'fijo') return provider.montoFijo;
+  if (provider.esquema === 'fijo') return Number(provider.montoFijo) || 0;
   const suma = registros.filter((r) => r.cicloId === ciclo.id).reduce((a, r) => a + Number(r.monto || 0), 0);
-  if (provider.esquema === 'variable_con_tope') return Math.min(suma, provider.tope);
+  if (provider.esquema === 'variable_con_tope') return Math.min(suma, Number(provider.tope) || 0);
   return suma;
-}
-
-function ejecutarCorteAutomatico(data) {
-  data.ciclos.forEach((c) => {
-    if (c.estado === 'abierto' && !c.habilitado && daysUntil(c.fechaVencimiento) <= 0) {
-      const provider = data.providers.find((p) => p.id === c.providerId);
-      const sugerido = montoSugerido(provider, c, data.registros);
-      if (sugerido > 0) { c.habilitado = true; c.monto = sugerido; c.autoHabilitado = true; }
-    }
-  });
 }
 
 /* ================= SHARED STYLES ================= */
@@ -362,13 +348,25 @@ function renderLogin(providers, onLogin) {
       function showError(msg) { errorBox.textContent = msg; errorBox.style.display = msg ? 'block' : 'none'; }
       emailInput.addEventListener('input', () => showError(''));
       pwdInput.addEventListener('input', () => showError(''));
-      function tryLogin() {
-        const u = ADMIN_USERS.find((u) => u.email.toLowerCase() === emailInput.value.trim().toLowerCase());
-        if (!u) { showError('No encontramos esa cuenta de Autolab.'); return; }
-        if (u.password !== pwdInput.value) { showError('Contraseña incorrecta.'); return; }
-        onLogin({ role: 'admin', email: u.email });
+      let busy = false;
+      async function tryLogin() {
+        if (busy) return;
+        showError('');
+        const email = emailInput.value.trim();
+        const password = pwdInput.value;
+        if (!email || !password) { showError('Escribe tu correo y contraseña.'); return; }
+        busy = true; loginBtn.disabled = true; loginBtn.textContent = 'Entrando…';
+        try {
+          const res = await api.post('loginAdmin', { email, password });
+          onLogin(res.session);
+        } catch (err) {
+          showError(err.message || 'No se pudo entrar. Intenta de nuevo.');
+        } finally {
+          busy = false; loginBtn.disabled = false; loginBtn.textContent = 'Entrar al panel';
+        }
       }
       pwdInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') tryLogin(); });
+      const loginBtn = Btn('Entrar al panel', { full: true, onClick: tryLogin });
       return h('div', { style: { minHeight: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px' } }, [
         h('div', { style: { maxWidth: '380px', width: '100%', textAlign: 'center' } }, [
           h('img', { src: LOGO_AUTOLAB, alt: 'Autolab', style: { width: '44px', height: '44px', borderRadius: '10px', display: 'inline-block' } }),
@@ -379,7 +377,7 @@ function renderLogin(providers, onLogin) {
             Field('Contraseña', pwd.wrap),
           ]),
           errorBox,
-          Btn('Entrar al panel', { full: true, onClick: tryLogin }),
+          loginBtn,
           h('div', { style: { marginTop: '14px' } }, [
             h('button', { style: linkBtnStyle, onClick: () => { mode = null; paint(); } }, [Icon('arrow-left', 13), ' volver']),
           ]),
@@ -387,21 +385,32 @@ function renderLogin(providers, onLogin) {
       ]);
     }
     // proveedor
-    let error = '';
     const emailInput = h('input', { style: inputStyle, placeholder: 'tucorreo@empresa.mx' });
     const pwd = PasswordInput();
     const pwdInput = pwd.input;
     const errorBox = h('div', { style: { color: C.red, fontSize: '12.5px', marginBottom: '10px', display: 'none' } });
-    function showError(msg) { error = msg; errorBox.textContent = msg; errorBox.style.display = msg ? 'block' : 'none'; }
+    function showError(msg) { errorBox.textContent = msg; errorBox.style.display = msg ? 'block' : 'none'; }
     emailInput.addEventListener('input', () => showError(''));
     pwdInput.addEventListener('input', () => showError(''));
-    function tryLogin() {
-      const p = providers.find((p) => p.email.toLowerCase() === emailInput.value.trim().toLowerCase());
-      if (!p) { showError('No encontramos una cuenta con ese correo. Contacta a Autolab.'); return; }
-      if (p.password !== pwdInput.value) { showError('Contraseña incorrecta.'); return; }
-      onLogin({ role: 'proveedor', providerId: p.id });
+    let busy = false;
+    async function tryLogin() {
+      if (busy) return;
+      showError('');
+      const email = emailInput.value.trim();
+      const password = pwdInput.value;
+      if (!email || !password) { showError('Escribe tu correo y contraseña.'); return; }
+      busy = true; loginBtn.disabled = true; loginBtn.textContent = 'Entrando…';
+      try {
+        const res = await api.post('loginProveedor', { email, password });
+        onLogin(res.session);
+      } catch (err) {
+        showError(err.message || 'No se pudo entrar. Intenta de nuevo.');
+      } finally {
+        busy = false; loginBtn.disabled = false; loginBtn.textContent = 'Entrar';
+      }
     }
     pwdInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') tryLogin(); });
+    const loginBtn = Btn('Entrar', { full: true, onClick: tryLogin });
     return h('div', { style: { minHeight: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px' } }, [
       h('div', { style: { maxWidth: '400px', width: '100%' } }, [
         h('div', { style: { textAlign: 'center', marginBottom: '18px' } }, [
@@ -410,13 +419,12 @@ function renderLogin(providers, onLogin) {
           h('div', { style: { fontSize: '12.5px', color: C.slate, marginTop: '4px' } }, 'Tu cuenta solo muestra tu propia información.'),
         ]),
         Field('Correo registrado', emailInput),
-        Field('Contraseña', pwd.wrap, 'Demo: revisa la contraseña asignada por Autolab.'),
+        Field('Contraseña', pwd.wrap),
         errorBox,
-        Btn('Entrar', { full: true, onClick: tryLogin }),
+        loginBtn,
         h('div', { style: { marginTop: '14px', textAlign: 'center' } }, [
           h('button', { style: linkBtnStyle, onClick: () => { mode = null; paint(); } }, [Icon('arrow-left', 13), ' volver']),
         ]),
-        h('div', { style: { marginTop: '16px', fontSize: '11px', color: C.slate, textAlign: 'center', lineHeight: '1.5' } }, `Demo — correos de prueba: ${providers.map((p) => p.email).join(' · ')}`),
       ]),
     ]);
   }
@@ -450,16 +458,11 @@ function renderProviderManagePanel(provider, data, mutate, onClose, parentPaint)
 
   function repaint() { clear(panel); panel.appendChild(buildBody()); }
 
-  function habilitar() { mutate((d) => { const c = d.ciclos.find((c) => c.id === ciclo.id); c.habilitado = true; c.monto = sugerido; c.autoHabilitado = false; }); }
-  function deshabilitar() { mutate((d) => { const c = d.ciclos.find((c) => c.id === ciclo.id); c.habilitado = false; c.monto = 0; }); }
-  function forzarCorteAhora() { mutate((d) => { const c = d.ciclos.find((c) => c.id === ciclo.id); c.fechaVencimiento = todayStr(); }); }
-  function aprobar() {
-    mutate((d) => {
-      const f = d.facturas.find((f) => f.id === factura.id);
-      f.estado = 'aprobada'; f.fechaAprobacion = todayStr(); f.fechaPagoProgramada = addDays(todayStr(), provider.diasCredito);
-    });
-  }
-  function rechazar() { mutate((d) => { d.facturas.find((f) => f.id === factura.id).estado = 'rechazada'; }); }
+  function habilitar() { mutate('habilitar', { cicloId: ciclo.id }); }
+  function deshabilitar() { mutate('deshabilitar', { cicloId: ciclo.id }); }
+  function forzarCorteAhora() { mutate('forzarCorte', { cicloId: ciclo.id }); }
+  function aprobar() { mutate('aprobarFactura', { facturaId: factura.id }); }
+  function rechazar() { mutate('rechazarFactura', { facturaId: factura.id }); }
   async function handleComprobanteFile(e) {
     const file = e.target.files[0];
     if (!file) return;
@@ -481,17 +484,12 @@ function renderProviderManagePanel(provider, data, mutate, onClose, parentPaint)
       extrayendo = false; repaint();
     }
   }
-  function registrarPago() {
+  async function registrarPago() {
     if (!refComprobante) return;
-    mutate((d) => {
-      const f = d.facturas.find((f) => f.id === factura.id);
-      f.estado = 'pagada';
-      f.comprobante = { referencia: refComprobante, fecha: todayStr(), archivo: comprobanteFile ? { nombre: comprobanteFile.name, data: comprobanteDataUrl } : undefined };
-      const c = d.ciclos.find((c) => c.id === ciclo.id);
-      c.estado = 'cerrado';
-      d.ciclos.push({ id: uid('c'), providerId: provider.id, estado: 'abierto', habilitado: false, monto: 0, fechaVencimiento: addDays(c.fechaVencimiento, provider.diasCiclo), autoHabilitado: false });
-    });
+    const referencia = refComprobante;
+    const archivo = comprobanteFile ? { nombre: comprobanteFile.name, data: comprobanteDataUrl } : undefined;
     showComprobante = false; refComprobante = ''; comprobanteFile = null; comprobanteDataUrl = ''; comprobanteError = '';
+    await mutate('registrarPago', { facturaId: factura.id, referencia, archivo });
   }
 
   function buildBody() {
@@ -548,8 +546,8 @@ function renderProviderManagePanel(provider, data, mutate, onClose, parentPaint)
           h('div', { style: { display: 'flex', gap: '8px' } }, [
             Btn('Guardar', { onClick: () => {
               if (!descInput.value || !montoInput.value) return;
-              mutate((d) => { d.registros.push({ id: uid('r'), providerId: provider.id, cicloId: ciclo.id, descripcion: descInput.value, monto: Number(montoInput.value), fecha: todayStr() }); });
               showAddRegistro = false;
+              mutate('agregarRegistro', { providerId: provider.id, cicloId: ciclo.id, descripcion: descInput.value, monto: Number(montoInput.value) });
             } }),
             Btn('Cancelar', { variant: 'ghost', onClick: () => { showAddRegistro = false; repaint(); } }),
           ]),
@@ -572,8 +570,8 @@ function renderProviderManagePanel(provider, data, mutate, onClose, parentPaint)
       card.appendChild(h('div', { style: { fontSize: '11.5px', color: C.slate, marginBottom: '6px' } }, `Subida el ${formatDate(factura.fecha)}`));
       if (factura.pdf || factura.xml) {
         const row = h('div', { style: { display: 'flex', gap: '14px', marginBottom: '8px' } });
-        if (factura.pdf) row.appendChild(h('a', { href: factura.pdf.data, download: factura.pdf.nombre, style: { fontSize: '12px', color: C.teal, display: 'flex', alignItems: 'center', gap: '4px' } }, [Icon('file-text', 13), ' Ver PDF']));
-        if (factura.xml) row.appendChild(h('a', { href: factura.xml.data, download: factura.xml.nombre, style: { fontSize: '12px', color: C.teal, display: 'flex', alignItems: 'center', gap: '4px' } }, [Icon('file-text', 13), ' Ver XML']));
+        if (factura.pdf) row.appendChild(h('a', { href: factura.pdf.url, target: '_blank', rel: 'noopener', style: { fontSize: '12px', color: C.teal, display: 'flex', alignItems: 'center', gap: '4px' } }, [Icon('file-text', 13), ' Ver PDF']));
+        if (factura.xml) row.appendChild(h('a', { href: factura.xml.url, target: '_blank', rel: 'noopener', style: { fontSize: '12px', color: C.teal, display: 'flex', alignItems: 'center', gap: '4px' } }, [Icon('file-text', 13), ' Ver XML']));
         if (!factura.pdf || !factura.xml) row.appendChild(h('span', { style: { fontSize: '11.5px', color: C.red, display: 'flex', alignItems: 'center', gap: '4px' } }, [Icon('alert-triangle', 12), ` Falta ${!factura.pdf ? 'PDF' : 'XML'}`]));
         card.appendChild(row);
       }
@@ -617,7 +615,7 @@ function renderProviderManagePanel(provider, data, mutate, onClose, parentPaint)
           h('span', { style: { color: C.slate } }, `${formatDate(f.comprobante?.fecha || f.fecha)} · ${f.folio} · ref. ${f.comprobante?.referencia || '—'}`),
           h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } }, [
             h('span', { style: { fontFamily: 'JetBrains Mono, monospace', fontWeight: '600' } }, formatMoney(f.monto)),
-            f.comprobante?.archivo ? h('a', { href: f.comprobante.archivo.data, download: f.comprobante.archivo.nombre, style: { color: C.teal, display: 'flex', alignItems: 'center' } }, [Icon('receipt', 13)]) : null,
+            f.comprobante?.archivo ? h('a', { href: f.comprobante.archivo.url, target: '_blank', rel: 'noopener', style: { color: C.teal, display: 'flex', alignItems: 'center' } }, [Icon('receipt', 13)]) : null,
           ]),
         ]));
       });
@@ -637,11 +635,24 @@ function renderAdminApp(data, onLogout, onRefresh) {
   let openId = null;
   let showNuevo = false;
 
+  let busy = false;
   function paint() {
     clear(root);
     root.appendChild(build());
   }
-  function mutate(fn) { fn(data); saveState(data); paint(); }
+  async function mutate(accion, payload) {
+    if (busy) return;
+    busy = true;
+    try {
+      await api.post(accion, payload);
+      const fresh = await api.get();
+      data.providers = fresh.providers; data.ciclos = fresh.ciclos; data.registros = fresh.registros; data.facturas = fresh.facturas;
+    } catch (err) {
+      alert('No se pudo guardar: ' + (err.message || 'intenta de nuevo.'));
+    } finally {
+      busy = false; paint();
+    }
+  }
 
   function openManage(id) { openId = id; paint(); }
   function closeManage() { openId = null; paint(); }
@@ -748,11 +759,8 @@ function renderAdminApp(data, onLogout, onRefresh) {
     const provider = data.providers.find((p) => p.id === openId);
     if (provider) container.appendChild(renderProviderManagePanel(provider, data, mutate, closeManage, paint));
     if (showNuevo) container.appendChild(renderNuevoProveedorForm(() => { showNuevo = false; paint(); }, (nuevo) => {
-      mutate((d) => {
-        d.providers.push(nuevo);
-        d.ciclos.push({ id: uid('c'), providerId: nuevo.id, estado: 'abierto', habilitado: false, monto: 0, fechaVencimiento: addDays(todayStr(), Number(nuevo.diasCiclo)), autoHabilitado: false });
-      });
       showNuevo = false;
+      mutate('nuevoProveedor', nuevo);
     }));
 
     return container;
@@ -861,9 +869,22 @@ function renderProviderApp(provider, data, onLogout, onRefresh) {
   let showForm = false;
   let fileError = '';
   let enviando = false;
+  let busy = false;
 
   function paint() { clear(root); root.appendChild(build()); }
-  function mutate(fn) { fn(data); saveState(data); paint(); }
+  async function mutate(accion, payload) {
+    if (busy) return;
+    busy = true;
+    try {
+      await api.post(accion, payload);
+      const fresh = await api.get();
+      data.providers = fresh.providers; data.ciclos = fresh.ciclos; data.registros = fresh.registros; data.facturas = fresh.facturas;
+    } catch (err) {
+      alert('No se pudo enviar: ' + (err.message || 'intenta de nuevo.'));
+    } finally {
+      busy = false; paint();
+    }
+  }
 
   function build() {
     const ciclo = data.ciclos.find((c) => c.providerId === provider.id && c.estado === 'abierto');
@@ -936,10 +957,11 @@ function renderProviderApp(provider, data, onLogout, onRefresh) {
               try {
                 const pdfData = await fileToDataUrl(pdfFile);
                 const xmlData = await fileToDataUrl(xmlFile);
-                mutate((d) => {
-                  d.facturas.push({ id: uid('f'), providerId: provider.id, cicloId: ciclo.id, folio: folioInput.value, monto: Number(montoInput.value), fecha: todayStr(), nota: notaInput.value, estado: 'en_revision', pdf: { nombre: pdfFile.name, data: pdfData }, xml: { nombre: xmlFile.name, data: xmlData } });
-                });
                 showForm = false;
+                await mutate('subirFactura', {
+                  providerId: provider.id, cicloId: ciclo.id, folio: folioInput.value, monto: Number(montoInput.value), nota: notaInput.value,
+                  pdf: { nombre: pdfFile.name, data: pdfData }, xml: { nombre: xmlFile.name, data: xmlData },
+                });
               } finally {
                 enviando = false;
               }
@@ -956,8 +978,8 @@ function renderProviderApp(provider, data, onLogout, onRefresh) {
       card.appendChild(h('div', { style: { fontSize: '11.5px', color: C.slate, marginTop: '4px' } }, `Subida el ${formatDate(factura.fecha)}`));
       if (factura.pdf || factura.xml) {
         const row = h('div', { style: { display: 'flex', gap: '14px', marginTop: '8px' } });
-        if (factura.pdf) row.appendChild(h('a', { href: factura.pdf.data, download: factura.pdf.nombre, style: { fontSize: '12px', color: C.teal, display: 'flex', alignItems: 'center', gap: '4px' } }, [Icon('file-text', 13), ' PDF']));
-        if (factura.xml) row.appendChild(h('a', { href: factura.xml.data, download: factura.xml.nombre, style: { fontSize: '12px', color: C.teal, display: 'flex', alignItems: 'center', gap: '4px' } }, [Icon('file-text', 13), ' XML']));
+        if (factura.pdf) row.appendChild(h('a', { href: factura.pdf.url, target: '_blank', rel: 'noopener', style: { fontSize: '12px', color: C.teal, display: 'flex', alignItems: 'center', gap: '4px' } }, [Icon('file-text', 13), ' PDF']));
+        if (factura.xml) row.appendChild(h('a', { href: factura.xml.url, target: '_blank', rel: 'noopener', style: { fontSize: '12px', color: C.teal, display: 'flex', alignItems: 'center', gap: '4px' } }, [Icon('file-text', 13), ' XML']));
         card.appendChild(row);
       }
       if (factura.estado === 'en_revision') card.appendChild(h('div', { style: { fontSize: '12.5px', color: C.gold, marginTop: '8px' } }, 'Autolab está revisando tu factura.'));
@@ -965,7 +987,7 @@ function renderProviderApp(provider, data, onLogout, onRefresh) {
       if (factura.estado === 'pagada') {
         card.appendChild(h('div', { style: { fontSize: '12.5px', color: C.teal, marginTop: '8px', display: 'flex', alignItems: 'center', gap: '6px' } }, [
           Icon('receipt', 13), ` Pagada el ${formatDate(factura.comprobante?.fecha)} · comprobante ${factura.comprobante?.referencia}`,
-          factura.comprobante?.archivo ? h('a', { href: factura.comprobante.archivo.data, download: factura.comprobante.archivo.nombre, style: { color: C.teal, marginLeft: '4px' } }, '(ver archivo)') : null,
+          factura.comprobante?.archivo ? h('a', { href: factura.comprobante.archivo.url, target: '_blank', rel: 'noopener', style: { color: C.teal, marginLeft: '4px' } }, '(ver archivo)') : null,
         ]));
       }
       facCard.appendChild(card);
@@ -978,9 +1000,9 @@ function renderProviderApp(provider, data, onLogout, onRefresh) {
     } else {
       historial.forEach((f) => {
         const links = h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } });
-        if (f.pdf) links.appendChild(h('a', { href: f.pdf.data, download: f.pdf.nombre, title: 'Descargar PDF', style: { color: C.teal, display: 'flex', alignItems: 'center' } }, [Icon('file-text', 14)]));
-        if (f.xml) links.appendChild(h('a', { href: f.xml.data, download: f.xml.nombre, title: 'Descargar XML', style: { color: C.slate, display: 'flex', alignItems: 'center' } }, [Icon('file-text', 14)]));
-        if (f.comprobante?.archivo) links.appendChild(h('a', { href: f.comprobante.archivo.data, download: f.comprobante.archivo.nombre, title: 'Descargar comprobante de pago', style: { color: C.gold, display: 'flex', alignItems: 'center' } }, [Icon('receipt', 14)]));
+        if (f.pdf) links.appendChild(h('a', { href: f.pdf.url, target: '_blank', rel: 'noopener', title: 'Descargar PDF', style: { color: C.teal, display: 'flex', alignItems: 'center' } }, [Icon('file-text', 14)]));
+        if (f.xml) links.appendChild(h('a', { href: f.xml.url, target: '_blank', rel: 'noopener', title: 'Descargar XML', style: { color: C.slate, display: 'flex', alignItems: 'center' } }, [Icon('file-text', 14)]));
+        if (f.comprobante?.archivo) links.appendChild(h('a', { href: f.comprobante.archivo.url, target: '_blank', rel: 'noopener', title: 'Descargar comprobante de pago', style: { color: C.gold, display: 'flex', alignItems: 'center' } }, [Icon('receipt', 14)]));
         inner.appendChild(h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '12.5px', padding: '7px 0', borderBottom: `1px solid ${C.line}` } }, [
           h('span', { style: { color: C.slate } }, `${formatDate(f.fecha)} · ${f.folio}`),
           h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } }, [h('span', { style: { fontFamily: 'JetBrains Mono, monospace', fontWeight: '600' } }, formatMoney(f.monto)), EstadoFacturaTag(f.estado), links]),
@@ -1005,24 +1027,41 @@ function mountApp() {
   const rootEl = document.getElementById('portal-root');
   let session = loadSession();
 
-  function paintTop() {
+  function showLoading(msg) {
     clear(rootEl);
-    let data = loadState();
-    if (!data) data = seedState();
-    ejecutarCorteAutomatico(data);
-    saveState(data);
-
-    if (!session) {
-      rootEl.appendChild(renderLogin(data.providers, (s) => { session = s; saveSession(s); paintTop(); }));
-    } else if (session.role === 'admin') {
-      rootEl.appendChild(renderAdminApp(data, () => { session = null; saveSession(null); paintTop(); }, paintTop));
+    rootEl.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', minHeight: '500px', color: C.slate, fontSize: '13px' } }, msg || 'Cargando…'));
+  }
+  function showError(msg, retry) {
+    clear(rootEl);
+    rootEl.appendChild(h('div', { style: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', minHeight: '500px', gap: '14px', padding: '24px', textAlign: 'center' } }, [
+      h('div', { style: { color: C.red, fontSize: '13.5px', maxWidth: '360px' } }, msg),
+      Btn('Reintentar', { onClick: retry }),
+    ]));
+  }
+  function paintLogin() {
+    clear(rootEl);
+    rootEl.appendChild(renderLogin([], (s) => { session = s; saveSession(s); enterApp(); }));
+  }
+  async function enterApp() {
+    showLoading('Cargando datos…');
+    let data;
+    try {
+      data = await api.get();
+    } catch (err) {
+      showError(err.message || 'No se pudo conectar con el servidor. Revisa tu conexión e intenta de nuevo.', enterApp);
+      return;
+    }
+    clear(rootEl);
+    if (session.role === 'admin') {
+      rootEl.appendChild(renderAdminApp(data, () => { session = null; saveSession(null); paintLogin(); }, enterApp));
     } else {
       const provider = data.providers.find((p) => p.id === session.providerId);
-      if (!provider) { session = null; saveSession(null); paintTop(); return; }
-      rootEl.appendChild(renderProviderApp(provider, data, () => { session = null; saveSession(null); paintTop(); }, paintTop));
+      if (!provider) { session = null; saveSession(null); paintLogin(); return; }
+      rootEl.appendChild(renderProviderApp(provider, data, () => { session = null; saveSession(null); paintLogin(); }, enterApp));
     }
   }
-  paintTop();
+
+  if (session) enterApp(); else paintLogin();
 }
 
 document.addEventListener('DOMContentLoaded', mountApp);
