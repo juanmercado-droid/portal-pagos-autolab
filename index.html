@@ -57,8 +57,10 @@ const ESQUEMAS = {
   por_servicio: { label: 'Por servicio', color: C.teal, icon: 'tool', desc: (p) => `Variable según servicios registrados (montos con IVA incluido), sin tope. Ciclo de ${p.diasCiclo} días.` },
   por_evento: { label: 'Por evento', color: C.slate, icon: 'calendar-time', desc: (p) => `Se paga por evento u hito completado (montos con IVA incluido). Ciclo de ${p.diasCiclo} días.` },
   variable_con_tope: { label: 'Variable con tope', color: C.plum, icon: 'shield-check', desc: (p) => `Variable según consumo registrado (IVA incluido), con tope de ${formatMoney(p.tope)}. Ciclo de ${p.diasCiclo} días.` },
+  mixto: { label: 'Fijo + por servicio', color: C.gold, icon: 'cash', desc: (p) => `Fijo de ${formatMoney(p.montoFijo)} cada ${p.diasCiclo} días, más los servicios variables que se registren ese ciclo (todo con IVA incluido).` },
 };
 const NOTA_IVA = 'Todos los montos de este portal son con IVA incluido: lo registrado, lo habilitado y lo facturado.';
+const CIUDADES = ['Ciudad de México', 'Guadalajara', 'Monterrey', 'Querétaro', 'Puebla', 'Toluca', 'León', 'Tijuana', 'Mérida', 'San Luis Potosí', 'Otra'];
 const MAX_FILE_MB = 2;
 const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbylUHPlHVVlmgeZ8SW35hPT7mvTidYFsID6T2j_IydQ-I_HEZ9v5msoOgK4GZ4BkYLj/exec';
 
@@ -163,6 +165,7 @@ function montoSugerido(provider, ciclo, registros) {
   if (provider.esquema === 'fijo') return Number(provider.montoFijo) || 0;
   const suma = registros.filter((r) => r.cicloId === ciclo.id).reduce((a, r) => a + Number(r.monto || 0), 0);
   if (provider.esquema === 'variable_con_tope') return Math.min(suma, Number(provider.tope) || 0);
+  if (provider.esquema === 'mixto') return (Number(provider.montoFijo) || 0) + suma;
   return suma;
 }
 
@@ -480,12 +483,27 @@ function renderProviderManagePanel(provider, data, mutate, onClose, parentPaint)
 
   function repaint() { clear(panel); panel.appendChild(buildBody()); }
 
+  let editModalNode = null;
+  function openEditar() {
+    if (editModalNode) return;
+    editModalNode = renderProveedorForm(closeEditar, saveEditar, provider);
+    overlay.appendChild(editModalNode);
+  }
+  function closeEditar() { if (editModalNode) { overlay.removeChild(editModalNode); editModalNode = null; } }
+  function saveEditar(payload) { closeEditar(); mutate('editarProveedor', payload); }
+
   function habilitar() { mutate('habilitar', { cicloId: ciclo.id }); }
   function deshabilitar() { mutate('deshabilitar', { cicloId: ciclo.id }); }
   function toggleActivo() {
     const accionTexto = provider.activo ? 'inhabilitar' : 'reactivar';
     if (provider.activo && !confirm(`¿Inhabilitar a ${provider.nombre}? No podrá entrar al portal hasta que lo reactives.`)) return;
     mutate('toggleActivo', { providerId: provider.id, activo: !provider.activo });
+  }
+  function eliminarProveedorPermanente() {
+    const escrito = prompt(`Esto borra a "${provider.nombre}" y TODO su historial (ciclos, registros, facturas) para siempre — no se puede deshacer.\n\nSi estás seguro, escribe su nombre exacto para confirmar:`);
+    if (escrito === null) return;
+    if (escrito.trim() !== provider.nombre.trim()) { alert('El nombre no coincide. No se eliminó nada.'); return; }
+    mutate('eliminarProveedor', { providerId: provider.id });
   }
   function forzarCorteAhora() { mutate('forzarCorte', { cicloId: ciclo.id }); }
   function aprobar() { mutate('aprobarFactura', { facturaId: factura.id }); }
@@ -523,10 +541,16 @@ function renderProviderManagePanel(provider, data, mutate, onClose, parentPaint)
     const head = h('div', { style: { background: C.ink, color: C.paper, padding: '20px 22px' } }, [
       h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '8px' } }, [
         h('button', { style: { background: 'transparent', border: 'none', color: C.paper, opacity: '0.7', cursor: 'pointer', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12.5px' }, onClick: onClose }, [Icon('x', 14), ' Cerrar']),
-        h('button', {
-          style: { background: provider.activo ? 'transparent' : `${C.gold}22`, border: `1px solid ${provider.activo ? C.paper + '55' : C.gold}`, color: provider.activo ? C.paper : C.gold, borderRadius: '7px', padding: '5px 10px', fontSize: '11.5px', display: 'flex', alignItems: 'center', gap: '5px', cursor: 'pointer' },
-          onClick: toggleActivo,
-        }, [Icon(provider.activo ? 'alert-triangle' : 'circle-check', 12), provider.activo ? ' Inhabilitar proveedor' : ' Reactivar proveedor']),
+        h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } }, [
+          h('button', {
+            style: { background: 'transparent', border: `1px solid ${C.paper}55`, color: C.paper, borderRadius: '7px', padding: '5px 10px', fontSize: '11.5px', display: 'flex', alignItems: 'center', gap: '5px', cursor: 'pointer' },
+            onClick: openEditar,
+          }, [Icon('tool', 12), ' Editar']),
+          h('button', {
+            style: { background: provider.activo ? 'transparent' : `${C.gold}22`, border: `1px solid ${provider.activo ? C.paper + '55' : C.gold}`, color: provider.activo ? C.paper : C.gold, borderRadius: '7px', padding: '5px 10px', fontSize: '11.5px', display: 'flex', alignItems: 'center', gap: '5px', cursor: 'pointer' },
+            onClick: toggleActivo,
+          }, [Icon(provider.activo ? 'alert-triangle' : 'circle-check', 12), provider.activo ? ' Inhabilitar proveedor' : ' Reactivar proveedor']),
+        ]),
       ]),
       !provider.activo ? h('div', { style: { display: 'inline-flex', alignItems: 'center', gap: '5px', background: `${C.red}22`, color: '#ffb4ad', fontSize: '11px', fontWeight: '700', padding: '3px 9px', borderRadius: '999px', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.03em' } }, [Icon('alert-triangle', 11), ' Inhabilitado — no puede entrar al portal']) : null,
       h('div', { style: { fontFamily: 'Space Grotesk, sans-serif', fontWeight: '700', fontSize: '19px' } }, provider.nombre),
@@ -654,6 +678,15 @@ function renderProviderManagePanel(provider, data, mutate, onClose, parentPaint)
         ]));
       });
     }
+
+    body.appendChild(h('div', { style: { marginTop: '28px', paddingTop: '18px', borderTop: `1px dashed ${C.red}55` } }, [
+      h('div', { style: { fontSize: '11px', fontWeight: '700', color: C.red, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '8px' } }, 'Zona de peligro'),
+      h('button', {
+        style: { background: 'transparent', border: `1px solid ${C.red}55`, color: C.red, borderRadius: '8px', padding: '8px 14px', fontSize: '12.5px', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' },
+        onClick: eliminarProveedorPermanente,
+      }, [Icon('x', 13), ' Eliminar proveedor permanentemente']),
+      h('div', { style: { fontSize: '11px', color: C.slate, marginTop: '6px' } }, 'Borra al proveedor y todo su historial. No se puede deshacer.'),
+    ]));
 
     const wrap = h('div', {});
     wrap.appendChild(head); wrap.appendChild(body);
@@ -823,7 +856,7 @@ function renderAdminApp(data, onLogout, onRefresh) {
 
     const provider = data.providers.find((p) => p.id === openId);
     if (provider) container.appendChild(renderProviderManagePanel(provider, data, mutate, closeManage, paint));
-    if (showNuevo) container.appendChild(renderNuevoProveedorForm(() => { showNuevo = false; paint(); }, (nuevo) => {
+    if (showNuevo) container.appendChild(renderProveedorForm(() => { showNuevo = false; paint(); }, (nuevo) => {
       showNuevo = false;
       mutate('nuevoProveedor', nuevo);
     }));
@@ -836,8 +869,15 @@ function renderAdminApp(data, onLogout, onRefresh) {
 }
 
 /* ================= ALTA DE PROVEEDOR ================= */
-function renderNuevoProveedorForm(onClose, onSave) {
-  const f = {
+function renderProveedorForm(onClose, onSave, existingProvider) {
+  const isEdit = !!existingProvider;
+  const f = isEdit ? {
+    nombre: existingProvider.nombre || '', email: existingProvider.email || '', ciudad: existingProvider.ciudad || '',
+    tipo: existingProvider.tipo || 'externo', rfc: existingProvider.rfc || '', diasCredito: existingProvider.diasCredito ?? 15,
+    esquema: existingProvider.esquema || 'por_servicio', montoFijo: existingProvider.montoFijo ?? '', tope: existingProvider.tope ?? '',
+    diasCiclo: existingProvider.diasCiclo ?? 30, condiciones: existingProvider.condiciones || '',
+    cuenta: existingProvider.cuenta || '', password: '', docs: { csf: !!existingProvider.docs?.csf, caratula: !!existingProvider.docs?.caratula },
+  } : {
     nombre: '', email: '', ciudad: '', tipo: 'externo', rfc: '', diasCredito: 15,
     esquema: 'por_servicio', montoFijo: '', tope: '', diasCiclo: 30, condiciones: '',
     cuenta: '', password: '', docs: { csf: false, caratula: false },
@@ -851,20 +891,30 @@ function renderNuevoProveedorForm(onClose, onSave) {
 
   function build() {
     panel.appendChild(h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '16px' } }, [
-      h('div', { style: { fontFamily: 'Space Grotesk, sans-serif', fontWeight: '700', fontSize: '18px', color: C.ink } }, 'Nuevo proveedor'),
+      h('div', { style: { fontFamily: 'Space Grotesk, sans-serif', fontWeight: '700', fontSize: '18px', color: C.ink } }, isEdit ? 'Editar proveedor' : 'Nuevo proveedor'),
       h('button', { style: { background: 'none', border: 'none', cursor: 'pointer' }, onClick: onClose }, [Icon('x', 18, C.slate)]),
     ]));
 
     const nombreInput = h('input', { style: inputStyle, value: f.nombre }); nombreInput.addEventListener('input', (e) => f.nombre = e.target.value);
     const emailInput = h('input', { style: inputStyle, value: f.email, placeholder: 'contacto@proveedor.mx' }); emailInput.addEventListener('input', (e) => f.email = e.target.value);
     const rfcInput = h('input', { style: inputStyle, value: f.rfc }); rfcInput.addEventListener('input', (e) => f.rfc = e.target.value);
-    const ciudadInput = h('input', { style: inputStyle, value: f.ciudad }); ciudadInput.addEventListener('input', (e) => f.ciudad = e.target.value);
+
+    const ciudadConocida = CIUDADES.includes(f.ciudad);
+    const ciudadSelect = h('select', { style: inputStyle }, CIUDADES.map((c) => h('option', { value: c }, c)));
+    ciudadSelect.value = ciudadConocida ? f.ciudad : 'Otra';
+    const ciudadOtraInput = h('input', { style: { ...inputStyle, marginTop: '8px', display: ciudadSelect.value === 'Otra' ? 'block' : 'none' }, value: ciudadConocida ? '' : f.ciudad, placeholder: 'Escribe la ciudad' });
+    ciudadSelect.addEventListener('change', (e) => {
+      if (e.target.value === 'Otra') { ciudadOtraInput.style.display = 'block'; f.ciudad = ciudadOtraInput.value; }
+      else { ciudadOtraInput.style.display = 'none'; f.ciudad = e.target.value; }
+    });
+    ciudadOtraInput.addEventListener('input', (e) => { f.ciudad = e.target.value; });
+    const ciudadWrap = h('div', {}, [ciudadSelect, ciudadOtraInput]);
 
     panel.appendChild(Field('Nombre o razón social', nombreInput));
     panel.appendChild(Field('Correo de acceso al portal', emailInput));
     panel.appendChild(h('div', { class: 'two-col-row', style: { display: 'flex', gap: '10px' } }, [
       h('div', { style: { flex: '1' } }, [Field('RFC', rfcInput)]),
-      h('div', { style: { flex: '1' } }, [Field('Ciudad', ciudadInput)]),
+      h('div', { style: { flex: '1' } }, [Field('Ciudad', ciudadWrap)]),
     ]));
 
     const tipoSelect = h('select', { style: inputStyle }, [
@@ -879,7 +929,7 @@ function renderNuevoProveedorForm(onClose, onSave) {
     esquemaSelect.addEventListener('change', (e) => { f.esquema = e.target.value; repaint(); });
     panel.appendChild(Field('Esquema de pago', esquemaSelect));
 
-    if (f.esquema === 'fijo') {
+    if (f.esquema === 'fijo' || f.esquema === 'mixto') {
       const montoFijoInput = h('input', { style: inputStyle, type: 'number', value: f.montoFijo }); montoFijoInput.addEventListener('input', (e) => f.montoFijo = e.target.value);
       panel.appendChild(Field('Monto fijo por ciclo, IVA incluido (MXN)', montoFijoInput));
     }
@@ -909,18 +959,26 @@ function renderNuevoProveedorForm(onClose, onSave) {
     ]), 'En este prototipo solo marcamos si ya se recibieron por correo.'));
 
     const passwordInput = h('input', { style: inputStyle, value: f.password }); passwordInput.addEventListener('input', (e) => f.password = e.target.value);
-    panel.appendChild(Field('Contraseña de acceso (demo)', passwordInput, 'Si la dejas vacía, se genera una automática.'));
+    panel.appendChild(Field('Contraseña de acceso (demo)', passwordInput, isEdit ? 'Déjala vacía para no cambiar la contraseña actual.' : 'Si la dejas vacía, se genera una automática.'));
 
-    panel.appendChild(Btn('Guardar proveedor', { full: true, variant: 'gold', onClick: () => {
+    panel.appendChild(Btn(isEdit ? 'Guardar cambios' : 'Guardar proveedor', { full: true, variant: 'gold', onClick: () => {
       if (!f.nombre || !f.email || !f.rfc) return;
-      onSave({
-        id: uid('p'), nombre: f.nombre, email: f.email.trim().toLowerCase(), ciudad: f.ciudad, tipo: f.tipo,
+      const payload = {
+        nombre: f.nombre, email: f.email.trim().toLowerCase(), ciudad: f.ciudad, tipo: f.tipo,
         rfc: f.rfc, diasCredito: Number(f.diasCredito), esquema: f.esquema,
-        montoFijo: f.esquema === 'fijo' ? Number(f.montoFijo || 0) : undefined,
+        montoFijo: (f.esquema === 'fijo' || f.esquema === 'mixto') ? Number(f.montoFijo || 0) : undefined,
         tope: f.esquema === 'variable_con_tope' ? Number(f.tope || 0) : undefined,
         diasCiclo: Number(f.diasCiclo), condiciones: f.condiciones, cuenta: f.cuenta || '—',
-        password: f.password || Math.random().toString(36).slice(2, 8), docs: f.docs,
-      });
+        docs: f.docs,
+      };
+      if (isEdit) {
+        payload.providerId = existingProvider.id;
+        if (f.password) payload.password = f.password;
+      } else {
+        payload.id = uid('p');
+        payload.password = f.password || Math.random().toString(36).slice(2, 8);
+      }
+      onSave(payload);
     } }));
   }
 
